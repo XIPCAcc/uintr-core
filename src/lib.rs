@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::task::Waker;
 use std::sync::OnceLock;
 
@@ -10,7 +11,8 @@ pub struct UintrToken {
 }
 
 pub struct Inner {
-    pub pending: Mutex<bool>,
+    pub seq: AtomicU32,
+    pub consumed_seq: AtomicU32,
     pub waker: Mutex<Option<Waker>>,
 }
 
@@ -20,7 +22,8 @@ impl UintrToken {
     pub fn new(name: &str) -> Self {
         Self {
             inner: Arc::new(Inner {
-                pending: Mutex::new(false),
+                seq: AtomicU32::new(0),
+                consumed_seq: AtomicU32::new(0),
                 waker: Mutex::new(None),
             }),
             name: name.to_string(),
@@ -28,7 +31,7 @@ impl UintrToken {
     }
     
     pub fn set_pending(&self) {
-        *self.inner.pending.lock().unwrap() = true;
+        self.inner.seq.fetch_add(1, Ordering::Release);
     }
     
     pub fn set_global_token(token: UintrToken) {
@@ -41,16 +44,16 @@ impl UintrToken {
 }
 
 pub fn process_uintr_wakers(token: &UintrToken) -> u32 {
-    let should_wake = {
-        let pending = token.inner.pending.lock().unwrap();
-        *pending
-    };
-    
-    if should_wake {
-        if let Some(waker) = token.inner.waker.lock().unwrap().take() {
-            waker.wake();
-            return 1;
-        }
+    let seq = token.inner.seq.load(Ordering::Acquire);
+    let consumed = token.inner.consumed_seq.load(Ordering::Acquire);
+    if seq == consumed {
+        return 0;
+    }
+
+    let waker = token.inner.waker.lock().unwrap();
+    if let Some(waker) = waker.as_ref() {
+        waker.wake_by_ref();
+        return 1;
     }
     0
 }
