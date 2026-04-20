@@ -50,9 +50,9 @@ pub fn process_uintr_wakers(token: &UintrToken) -> u32 {
         return 0;
     }
 
-    let waker = token.inner.waker.lock().unwrap();
-    if let Some(waker) = waker.as_ref() {
-        waker.wake_by_ref();
+    let mut waker_guard = token.inner.waker.lock().unwrap();
+    if let Some(waker) = waker_guard.take() {
+        waker.wake();
         return 1;
     }
     0
