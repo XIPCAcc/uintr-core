@@ -1,3 +1,5 @@
+use std::io::{self, Write};
+use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -16,7 +18,39 @@ pub struct Inner {
     pub waker: Mutex<Option<Waker>>,
 }
 
-static GLOBAL_TOKEN: OnceLock<UintrToken> = OnceLock::new();
+pub struct GlobalUintr {
+    pub token: UintrToken,
+    sender: UnixStream,
+    receiver: UnixStream,
+}
+
+static GLOBAL_UINTR: OnceLock<GlobalUintr> = OnceLock::new();
+
+impl GlobalUintr {
+    fn new(token: UintrToken) -> io::Result<Self> {
+        let (receiver, sender) = UnixStream::pair()?;
+        receiver.set_nonblocking(true)?;
+        sender.set_nonblocking(true)?;
+
+        Ok(Self {
+            token,
+            sender,
+            receiver,
+        })
+    }
+
+    pub fn notify(&self) -> io::Result<()> {
+        self.token.set_pending();
+
+        // Keep the interrupt path minimal: record state and poke the receiver.
+        let mut sender = &self.sender;
+        sender.write_all(&[1])
+    }
+
+    pub fn try_clone_receiver(&self) -> io::Result<UnixStream> {
+        self.receiver.try_clone()
+    }
+}
 
 impl UintrToken {
     pub fn new(name: &str) -> Self {
@@ -35,11 +69,47 @@ impl UintrToken {
     }
     
     pub fn set_global_token(token: UintrToken) {
-        let _ = GLOBAL_TOKEN.set(token);
+        let _ = init_global_uintr(token);
     }
     
     pub fn get_global_token() -> Option<UintrToken> {
-        GLOBAL_TOKEN.get().cloned()
+        global_uintr().map(|global| global.token.clone())
+    }
+}
+
+pub fn init_global_uintr(token: UintrToken) -> io::Result<&'static GlobalUintr> {
+    if let Some(global) = GLOBAL_UINTR.get() {
+        return Ok(global);
+    }
+
+    let global = GlobalUintr::new(token)?;
+    match GLOBAL_UINTR.set(global) {
+        Ok(()) => Ok(GLOBAL_UINTR.get().expect("global uintr just initialized")),
+        Err(_) => Ok(GLOBAL_UINTR.get().expect("global uintr should exist")),
+    }
+}
+
+pub fn global_uintr() -> Option<&'static GlobalUintr> {
+    GLOBAL_UINTR.get()
+}
+
+pub fn notify_global_uintr() -> io::Result<()> {
+    match global_uintr() {
+        Some(global) => global.notify(),
+        None => Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "global uintr is not initialized",
+        )),
+    }
+}
+
+pub fn try_clone_global_receiver() -> io::Result<UnixStream> {
+    match global_uintr() {
+        Some(global) => global.try_clone_receiver(),
+        None => Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "global uintr is not initialized",
+        )),
     }
 }
 
