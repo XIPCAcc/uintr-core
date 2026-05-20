@@ -1,8 +1,8 @@
-use std::io::{self, Write};
+use std::io;
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::task::Waker;
 use std::sync::OnceLock;
 
@@ -26,6 +26,17 @@ pub struct GlobalUintr {
 
 static GLOBAL_UINTR: OnceLock<GlobalUintr> = OnceLock::new();
 
+static NOTIFY_COUNT: AtomicU64 = AtomicU64::new(0);
+static WAKE_COUNT: AtomicU64 = AtomicU64::new(0);
+
+pub fn get_notify_count() -> u64 {
+    NOTIFY_COUNT.load(Ordering::Relaxed)
+}
+
+pub fn get_wake_count() -> u64 {
+    WAKE_COUNT.load(Ordering::Relaxed)
+}
+
 impl GlobalUintr {
     fn new(token: UintrToken) -> io::Result<Self> {
         let (receiver, sender) = UnixStream::pair()?;
@@ -41,10 +52,8 @@ impl GlobalUintr {
 
     pub fn notify(&self) -> io::Result<()> {
         self.token.set_pending();
-
-        // Keep the interrupt path minimal: record state and poke the receiver.
-        let mut sender = &self.sender;
-        sender.write_all(&[1])
+        NOTIFY_COUNT.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 
     pub fn try_clone_receiver(&self) -> io::Result<UnixStream> {
@@ -123,6 +132,7 @@ pub fn process_uintr_wakers(token: &UintrToken) -> u32 {
     let mut waker_guard = token.inner.waker.lock().unwrap();
     if let Some(waker) = waker_guard.take() {
         waker.wake();
+        WAKE_COUNT.fetch_add(1, Ordering::Relaxed);
         return 1;
     }
     0
