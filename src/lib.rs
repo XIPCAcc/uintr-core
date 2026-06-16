@@ -42,9 +42,14 @@ impl GlobalUintr {
     pub fn notify(&self) -> io::Result<()> {
         self.token.set_pending();
 
-        // Keep the interrupt path minimal: record state and poke the receiver.
-        let mut sender = &self.sender;
-        sender.write_all(&[1])
+        // 使用 try_lock 检测 waker，避免死锁
+        if let Ok(waker) = self.token.inner.waker.try_lock() {
+            if waker.is_some() {
+                let mut sender = &self.sender;
+                sender.write_all(&[1])?;
+            }
+        }
+        Ok(())
     }
 
     pub fn try_clone_receiver(&self) -> io::Result<UnixStream> {
